@@ -1,4 +1,7 @@
+import sqlite3
+
 from telemetry_gateway.database import TelemetryStore
+from telemetry_gateway.migrations import apply_migrations, migration_001
 from telemetry_gateway.models import BootRegistrationInput, TelemetryInput
 
 
@@ -79,3 +82,117 @@ def test_repeated_event_from_same_boot_is_a_duplicate() -> None:
         assert len(store.list_events(10)) == 1
     finally:
         store.close()
+
+
+def test_same_sequence_from_different_boots_is_not_a_duplicate() -> None:
+    store = TelemetryStore(":memory:")
+    try:
+        store.register_boot(
+            BootRegistrationInput(deviceId="device-01", bootId="boot-a")
+        )
+        store.register_boot(
+            BootRegistrationInput(deviceId="device-01", bootId="boot-b")
+        )
+
+        first = store.ingest(
+            telemetry(bootId="boot-a", sequence=1),
+            "2026-08-12T09:00:01+00:00",
+        )
+        second = store.ingest(
+            telemetry(bootId="boot-b", sequence=1, value=22.4),
+            "2026-08-12T09:00:02+00:00",
+        )
+
+        assert first.duplicate is False
+        assert second.duplicate is False
+        assert len(store.list_events(10)) == 2
+    finally:
+        store.close()
+
+
+def test_migration_002_preserves_data_and_enforces_boot_scoped_uniqueness() -> None:
+    # Build a version-1 database manually: apply migration_001, record it, seed one event.
+    conn = sqlite3.connect(":memory:", isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            )
+            """
+        )
+        migration_001(conn)
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (1, datetime('now'))"
+        )
+
+        # Seed the parent boot and one telemetry event under the old schema.
+        conn.execute(
+            "INSERT INTO device_boots (device_id, boot_id, generation, registered_at) "
+            "VALUES ('device-01', 'boot-a', 1, '2026-08-12T09:00:00')"
+        )
+        conn.execute(
+            "INSERT INTO telemetry_events "
+            "    (device_id, boot_id, generation, sequence, device_time, received_at, metric, value) "
+            "VALUES ('device-01', 'boot-a', 1, 1, '2026-08-12T09:00:00', '2026-08-12T09:00:01', 'temperature', 21.4)"
+        )
+
+        # Confirm version 2 has not been applied yet.
+        applied_before = {
+            row[0]
+            for row in conn.execute("SELECT version FROM schema_migrations").fetchall()
+        }
+        assert 2 not in applied_before
+
+        # Run the application's migration runner; it must skip version 1 and apply version 2.
+        apply_migrations(conn)
+
+        # 1. Version 2 must be recorded.
+        applied_after = {
+            row[0]
+            for row in conn.execute("SELECT version FROM schema_migrations").fetchall()
+        }
+        assert 2 in applied_after
+
+        # 2. Existing row must survive with all important fields intact.
+        row = conn.execute(
+            "SELECT device_id, boot_id, generation, sequence, metric, value "
+            "FROM telemetry_events"
+        ).fetchone()
+        assert row is not None
+        assert row["device_id"] == "device-01"
+        assert row["boot_id"] == "boot-a"
+        assert row["generation"] == 1
+        assert row["sequence"] == 1
+        assert row["metric"] == "temperature"
+        assert row["value"] == 21.4
+
+        # 3a. Same (device_id, boot_id, sequence) must be rejected — uniqueness enforced.
+        try:
+            conn.execute(
+                "INSERT INTO telemetry_events "
+                "    (device_id, boot_id, generation, sequence, device_time, received_at, metric, value) "
+                "VALUES ('device-01', 'boot-a', 1, 1, '2026-08-12T09:00:00', '2026-08-12T09:00:03', 'temperature', 99.0)"
+            )
+            raise AssertionError("Expected UNIQUE constraint violation was not raised")
+        except sqlite3.IntegrityError:
+            pass  # expected: same logical event must be rejected
+
+        # 3b. Same (device_id, sequence) but a different boot_id must be accepted —
+        #     the old UNIQUE (device_id, sequence) would have blocked this.
+        conn.execute(
+            "INSERT INTO device_boots (device_id, boot_id, generation, registered_at) "
+            "VALUES ('device-01', 'boot-b', 2, '2026-08-12T10:00:00')"
+        )
+        conn.execute(
+            "INSERT INTO telemetry_events "
+            "    (device_id, boot_id, generation, sequence, device_time, received_at, metric, value) "
+            "VALUES ('device-01', 'boot-b', 2, 1, '2026-08-12T10:00:00', '2026-08-12T10:00:01', 'temperature', 22.0)"
+        )
+        count = conn.execute("SELECT COUNT(*) FROM telemetry_events").fetchone()[0]
+        assert count == 2
+    finally:
+        conn.close()
