@@ -196,3 +196,55 @@ def test_migration_002_preserves_data_and_enforces_boot_scoped_uniqueness() -> N
         assert count == 2
     finally:
         conn.close()
+
+
+def test_current_state_uses_generation_then_sequence_not_device_time() -> None:
+    # Scenario A: a newer generation must win even when its deviceTime is earlier.
+    store = TelemetryStore(":memory:")
+    try:
+        store.register_boot(BootRegistrationInput(deviceId="device-01", bootId="boot-a"))
+        store.register_boot(BootRegistrationInput(deviceId="device-01", bootId="boot-b"))
+
+        store.ingest(
+            telemetry(bootId="boot-a", sequence=1, value=10.0,
+                      deviceTime="2026-08-12T12:00:00+00:00"),
+            "2026-08-12T09:00:01+00:00",
+        )
+
+        # boot-b is generation 2; its device clock is behind boot-a's.
+        result_a = store.ingest(
+            telemetry(bootId="boot-b", sequence=1, value=20.0,
+                      deviceTime="2026-08-12T08:00:00+00:00"),
+            "2026-08-12T09:00:02+00:00",
+        )
+
+        assert result_a.current_changed is True
+        assert store.list_current_states()[0].to_api()["bootId"] == "boot-b"
+        assert store.list_current_states()[0].to_api()["value"] == 20.0
+    finally:
+        store.close()
+
+    # Scenario B: a higher sequence within the same generation must win even when its
+    # deviceTime is earlier.
+    store2 = TelemetryStore(":memory:")
+    try:
+        store2.register_boot(BootRegistrationInput(deviceId="device-01", bootId="boot-a"))
+
+        store2.ingest(
+            telemetry(bootId="boot-a", sequence=2, value=30.0,
+                      deviceTime="2026-08-12T10:00:00+00:00"),
+            "2026-08-12T09:00:01+00:00",
+        )
+
+        # sequence=3 arrives out of order with an earlier device clock.
+        result_b = store2.ingest(
+            telemetry(bootId="boot-a", sequence=3, value=40.0,
+                      deviceTime="2026-08-12T09:00:00+00:00"),
+            "2026-08-12T09:00:02+00:00",
+        )
+
+        assert result_b.current_changed is True
+        assert store2.list_current_states()[0].to_api()["sequence"] == 3
+        assert store2.list_current_states()[0].to_api()["value"] == 40.0
+    finally:
+        store2.close()
