@@ -77,7 +77,6 @@ function connect() {
     status.textContent = 'Realtime connected';
     status.className = 'status online';
     setError('');
-    
     if (hasConnected) {
       loadSnapshot().catch((error) => setError(error.message));
     }

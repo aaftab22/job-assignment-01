@@ -140,7 +140,6 @@ def test_migration_002_preserves_data_and_enforces_boot_scoped_uniqueness() -> N
             "VALUES ('device-01', 'boot-a', 1, 1, '2026-08-12T09:00:00', '2026-08-12T09:00:01', 'temperature', 21.4)"
         )
 
-        # Confirm version 2 has not been applied yet.
         applied_before = {
             row[0]
             for row in conn.execute("SELECT version FROM schema_migrations").fetchall()
@@ -150,14 +149,12 @@ def test_migration_002_preserves_data_and_enforces_boot_scoped_uniqueness() -> N
         # Run the application's migration runner; it must skip version 1 and apply version 2.
         apply_migrations(conn)
 
-        # 1. Version 2 must be recorded.
         applied_after = {
             row[0]
             for row in conn.execute("SELECT version FROM schema_migrations").fetchall()
         }
         assert 2 in applied_after
 
-        # 2. Existing row must survive with all important fields intact.
         row = conn.execute(
             "SELECT device_id, boot_id, generation, sequence, metric, value "
             "FROM telemetry_events"
@@ -170,7 +167,6 @@ def test_migration_002_preserves_data_and_enforces_boot_scoped_uniqueness() -> N
         assert row["metric"] == "temperature"
         assert row["value"] == 21.4
 
-        # 3a. Same (device_id, boot_id, sequence) must be rejected — uniqueness enforced.
         try:
             conn.execute(
                 "INSERT INTO telemetry_events "
@@ -181,8 +177,6 @@ def test_migration_002_preserves_data_and_enforces_boot_scoped_uniqueness() -> N
         except sqlite3.IntegrityError:
             pass  # expected: same logical event must be rejected
 
-        # 3b. Same (device_id, sequence) but a different boot_id must be accepted —
-        #     the old UNIQUE (device_id, sequence) would have blocked this.
         conn.execute(
             "INSERT INTO device_boots (device_id, boot_id, generation, registered_at) "
             "VALUES ('device-01', 'boot-b', 2, '2026-08-12T10:00:00')"
