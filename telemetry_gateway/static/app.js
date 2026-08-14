@@ -6,6 +6,7 @@ const errorBox = document.querySelector('#error');
 let stopped = false;
 let retryTimer;
 let socket;
+let hasConnected = false;
 
 function stateKey(state) {
   return `${state.deviceId}:${state.metric}`;
@@ -76,6 +77,11 @@ function connect() {
     status.textContent = 'Realtime connected';
     status.className = 'status online';
     setError('');
+    
+    if (hasConnected) {
+      loadSnapshot().catch((error) => setError(error.message));
+    }
+    hasConnected = true;
   });
 
   socket.addEventListener('message', (event) => {
