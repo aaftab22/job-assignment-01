@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Protocol
 
 from fastapi import WebSocket
@@ -12,8 +13,9 @@ class StatePublisher(Protocol):
 
 
 class RealtimeHub:
-    def __init__(self) -> None:
+    def __init__(self, send_timeout: float = 1.0) -> None:
         self._clients: set[WebSocket] = set()
+        self._send_timeout = send_timeout
 
     async def connect(self, client: WebSocket) -> None:
         await client.accept()
@@ -26,7 +28,9 @@ class RealtimeHub:
         message = {"type": "device.state.changed", "data": state.to_api()}
         for client in tuple(self._clients):
             try:
-                await client.send_json(message)
+                await asyncio.wait_for(
+                    client.send_json(message), timeout=self._send_timeout
+                )
             except Exception:
                 self._clients.discard(client)
 
